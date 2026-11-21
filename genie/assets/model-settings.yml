@@ -1,0 +1,14 @@
+# Aider model settings used by genie. The machine is CPU-only with about 16 GB RAM.
+- name: ollama_chat/qwen2.5-coder:7b
+  edit_format: diff
+  use_repo_map: true
+  extra_params:
+    num_ctx: 8192
+    temperature: 0
+
+- name: ollama_chat/qwen2.5-coder:3b
+  edit_format: whole
+  use_repo_map: true
+  extra_params:
+    num_ctx: 8192
+    temperature: 0

@@ -1,0 +1,32 @@
+# Global genie settings. Per-machine overrides go in genie.local.toml (git-ignored).
+
+[local]
+model = "ollama_chat/qwen2.5-coder:7b"     # main local model
+edit_format = "diff"                       # diff avoids rewriting (and dropping) whole files
+fast_model = "ollama_chat/qwen2.5-coder:3b"  # used with --fast
+fast_edit_format = "whole"
+context_tokens = 8192                      # must match num_ctx in genie/assets/model-settings.yml
+map_tokens = 1024
+timeout_s = 1500                           # CPU-only machine: local attempts are slow
+
+[remote]
+enabled = true
+model = "anthropic/claude-sonnet-5-5"      # any litellm model id Aider supports
+api_key_env = "ANTHROPIC_API_KEY"          # genie only escalates when this env var is set
+edit_format = "diff"
+send_repo_map = false                      # send only the context packet + files to edit
+timeout_s = 600
+
+[escalation]
+min_coverage = 0.35   # below this, the task is treated as a new capability → remote
+local_retries = 1     # local attempts after the first, before escalating
+max_local_files = 2
+
+[context]
+max_chars = 9000      # about 2.3k tokens of conventions + reusable code + docs
+snippets = 3
+doc_sections = 2
+
+[ui]
+host = "127.0.0.1"
+port = 8765

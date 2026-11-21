@@ -1,0 +1,10 @@
+# Target workspaces hold project knowledge (index, conventions, run logs, diffs).
+# They stay on this machine.
+workspaces/
+genie.local.toml
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.aider*
+*.egg-info/

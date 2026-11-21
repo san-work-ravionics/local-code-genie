@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-code-genie"
+version = "0.1.0"
+description = "Local-first coding agent that reuses a repo's code and conventions, and escalates to a remote model only when needed"
+requires-python = ">=3.11"
+dependencies = []   # stdlib only; uses Aider (installed separately) as the edit engine
+
+[project.scripts]
+genie = "genie.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["genie*"]
+
+[tool.setuptools.package-data]
+genie = ["assets/*", "ui/*.html"]
+
+[tool.ruff]
+line-length = 110
