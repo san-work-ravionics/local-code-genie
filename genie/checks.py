@@ -10,6 +10,7 @@ Each check returns ``{"id", "status", "summary", "details": [...]}`` where statu
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -66,8 +67,23 @@ def _added(target: Target, base: str, rel: str, is_new: bool) -> list[tuple[int,
     return gitutil.added_lines(target.root, base, rel)
 
 
+def tests_for(target: Target, files: list[str]) -> list[str]:
+    """Test commands from [[test_map]] whose `when` globs match any of the files."""
+    cmds: list[str] = []
+    for tm in target.cfg.get("test_map", []):
+        if any(match_any(f, tm["when"]) for f in files) and tm["cmd"] not in cmds:
+            cmds.append(tm["cmd"])
+    return cmds
+
+
+def run_tests(target: Target, cmds: list[str]) -> dict[str, dict]:
+    """Run test commands; used once before the edit to record the baseline."""
+    return {cmd: _run_test_cmd(target, cmd) for cmd in cmds}
+
+
 def run_checks(target: Target, base: str, pre_untracked: set[str], editable: list[str],
-               task: str, allow_new: bool = False, test_cmd: str | None = None) -> list[dict]:
+               task: str, allow_new: bool = False, test_cmds: list[str] | None = None,
+               baseline: dict[str, dict] | None = None) -> list[dict]:
     root = target.root
     results: list[dict] = []
     changed = changed_files(target, base, pre_untracked)
@@ -89,6 +105,7 @@ def run_checks(target: Target, base: str, pre_untracked: set[str], editable: lis
     # --- collateral: existing functions/classes/CSS rules silently removed
     task_l = task.lower()
     removed_all = []
+    removed_syms: list[dict] = []
     for f in changed:
         before = gitutil.show(root, base, f)
         if before is None:
@@ -103,12 +120,18 @@ def run_checks(target: Target, base: str, pre_untracked: set[str], editable: lis
             if short and short in task_l:
                 continue  # the task names it, so removal may be intended
             removed_all.append(f"{f}: removed `{name}`")
+            removed_syms.append({"file": f, "name": name})
     if removed_all:
-        results.append(_result("collateral", "fail",
-                               f"{len(removed_all)} existing symbol(s) removed that the task did not mention",
-                               removed_all))
+        r = _result("collateral", "fail",
+                    f"{len(removed_all)} existing symbol(s) removed that the task did not mention",
+                    removed_all)
+        r["symbols"] = removed_syms
+        results.append(r)
     else:
         results.append(_result("collateral", "pass", "No existing code removed"))
+
+    # --- calls to methods that do not exist on the receiver's class
+    results.append(_typed_calls(target, base, changed, new_files))
 
     # --- syntax (Python)
     bad = []
@@ -180,13 +203,139 @@ def run_checks(target: Target, base: str, pre_untracked: set[str], editable: lis
     # --- lint (new violations only, compared with the base version)
     results.append(_lint(target, base, changed))
 
-    # --- tests
-    cmd = test_cmd if test_cmd is not None else target.section("checks").get("test_cmd", "")
-    if cmd:
-        results.append(_tests(target, cmd))
-    else:
-        results.append(_result("tests", "skip", "No test command configured (pass --test)"))
+    # --- tests (compared with the baseline taken before the edit)
+    cmds = test_cmds if test_cmds is not None else [c for c in [target.section("checks").get("test_cmd", "")] if c]
+    if not cmds:
+        results.append(_result("tests", "skip", "No test command for these files (add [[test_map]] or pass --test)"))
+    for cmd in cmds:
+        results.append(_tests_vs_baseline(target, cmd, (baseline or {}).get(cmd)))
     return results
+
+
+# ---------------------------------------------------------------- typed calls
+
+GENERIC_BASES = {"Generic", "object", "ABC", "Protocol", "Enum", "IntEnum", "StrEnum"}
+
+
+def _split_top(s: str) -> list[str]:
+    out, depth, cur = [], 0, ""
+    for ch in s:
+        if ch in "[(":
+            depth += 1
+        elif ch in "])":
+            depth -= 1
+        if ch == "," and depth == 0:
+            out.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    if cur.strip():
+        out.append(cur)
+    return out
+
+
+def _class_table(items: list[dict]) -> tuple[dict[str, list[str]], dict[str, set[str]]]:
+    bases: dict[str, list[str]] = {}
+    methods: dict[str, set[str]] = {}
+    for it in items:
+        if not it["file"].endswith(".py"):
+            continue
+        if it["kind"] == "class":
+            cname = it["name"].split(".")[-1]
+            m = re.match(r"class \w+\((.*)\)$", it.get("sig", ""))
+            bl = []
+            for b in _split_top(m.group(1)) if m else []:
+                b = re.sub(r"\[.*\]$", "", b.strip()).split(".")[-1]
+                if b and "=" not in b:
+                    bl.append(b)
+            bases.setdefault(cname, bl)
+            methods.setdefault(cname, set())
+        elif it["kind"] == "method":
+            parts = it["name"].split(".")
+            methods.setdefault(parts[-2], set()).add(parts[-1])
+    return bases, methods
+
+
+def _methods_of(cls: str, bases: dict, methods: dict, seen: set | None = None) -> set[str] | None:
+    """All methods of cls incl. inherited ones; None if any base is outside the repo."""
+    seen = seen or set()
+    if cls in seen:
+        return set()
+    seen.add(cls)
+    if cls not in bases:
+        return None
+    out = set(methods.get(cls, set()))
+    for b in bases[cls]:
+        if b in GENERIC_BASES:
+            continue
+        sub = _methods_of(b, bases, methods, seen)
+        if sub is None:
+            return None
+        out |= sub
+    return out
+
+
+def _ann_name(node) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    if isinstance(node, ast.Subscript):
+        return _ann_name(node.value)
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value.split(".")[-1]
+    return None
+
+
+def _typed_calls(target: Target, base: str, changed: list[str], new_files: list[str]) -> dict:
+    py = [f for f in changed if f.endswith(".py") and (target.root / f).exists()]
+    if not py or not target.index_path.exists():
+        return _result("calls", "skip", "No Python changes to resolve")
+    from .indexer import py_items  # local import keeps module load light
+    items = [it for it in json.loads(target.index_path.read_text(encoding="utf-8"))["items"]
+             if it["file"] not in py]
+    srcs = {f: _read(target.root, f) or "" for f in py}
+    for f, src in srcs.items():
+        items.extend(py_items(f, src))
+    bases, methods = _class_table(items)
+    problems = []
+    for f, src in srcs.items():
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:
+            continue
+        added = {n for n, _ in _added(target, base, f, f in new_files)}
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            env: dict[str, str] = {}
+            for a in fn.args.args + fn.args.kwonlyargs:
+                cls = _ann_name(a.annotation) if a.annotation is not None else None
+                if cls in bases:
+                    env[a.arg] = cls
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+                    cls = _ann_name(node.value.func)
+                    if cls in bases:
+                        for t in node.targets:
+                            if isinstance(t, ast.Name):
+                                env[t.id] = cls
+            for node in ast.walk(fn):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and isinstance(node.func.value, ast.Name)):
+                    continue
+                recv, attr = node.func.value.id, node.func.attr
+                if recv not in env or attr.startswith("__") or node.lineno not in added:
+                    continue
+                known = _methods_of(env[recv], bases, methods)
+                if known is None or attr in known:
+                    continue
+                avail = ", ".join(sorted(m for m in known if not m.startswith("_"))[:14])
+                problems.append(f"{f}:{node.lineno} `{recv}.{attr}()`: {env[recv]} has no method "
+                                f"`{attr}` (available: {avail})")
+    if problems:
+        return _result("calls", "fail", f"{len(problems)} call(s) to methods that do not exist", problems)
+    return _result("calls", "pass", "All calls on typed objects resolve to existing methods")
 
 
 def _ruff(target: Target, rel: str, content: str) -> list[dict]:
@@ -228,7 +377,7 @@ def _lint(target: Target, base: str, changed: list[str]) -> dict:
                    new_issues)
 
 
-def _tests(target: Target, cmd: str) -> dict:
+def _run_test_cmd(target: Target, cmd: str) -> dict:
     env = os.environ.copy()
     for k, v in target.section("checks").get("env", {}).items():
         env[k] = v.replace("{root}", str(target.root)).replace("{workdir}", str(target.workdir))
@@ -236,10 +385,21 @@ def _tests(target: Target, cmd: str) -> dict:
         p = subprocess.run(cmd, shell=True, cwd=target.workdir, capture_output=True, text=True,
                            encoding="utf-8", errors="replace", env=env, timeout=900)
     except subprocess.TimeoutExpired:
-        return _result("tests", "fail", f"Tests timed out: {cmd}")
-    tail = (p.stdout + p.stderr)[-2500:]
-    return _result("tests", "pass" if p.returncode == 0 else "fail",
-                   f"`{cmd}` exited {p.returncode}", tail.splitlines()[-30:])
+        return {"ok": False, "rc": None, "tail": [f"timed out: {cmd}"], "error": "timeout"}
+    lines = (p.stdout + p.stderr)[-2500:].splitlines()[-30:]
+    err = next((ln.strip() for ln in reversed(lines) if re.search(r"Error|FAILED|failed", ln)), "")
+    return {"ok": p.returncode == 0, "rc": p.returncode, "tail": lines, "error": err}
+
+
+def _tests_vs_baseline(target: Target, cmd: str, before: dict | None) -> dict:
+    now = _run_test_cmd(target, cmd)
+    if now["ok"]:
+        return _result("tests", "pass", f"`{cmd}` passed", now["tail"][-5:])
+    if before is not None and not before["ok"]:
+        return _result("tests", "warn",
+                       f"`{cmd}` was already failing before the change, so it cannot judge this edit"
+                       + (f" ({before['error'][:120]})" if before.get("error") else ""), now["tail"])
+    return _result("tests", "fail", f"`{cmd}` exited {now['rc']}", now["tail"])
 
 
 def overall(results: list[dict]) -> str:
@@ -251,10 +411,34 @@ def overall(results: list[dict]) -> str:
     return "pass"
 
 
-def failure_feedback(results: list[dict]) -> str:
+def failure_feedback(results: list[dict], target: Target | None = None, base: str | None = None) -> str:
     lines = []
     for r in results:
         if r["status"] in {"fail", "blocked"}:
             lines.append(f"- {r['id']}: {r['summary']}")
             lines.extend(f"    - {d}" for d in r["details"][:8])
-    return "\n".join(lines)
+    if target is not None and base:
+        lines.append(_preserve_block(results, target, base))
+    return "\n".join(x for x in lines if x)
+
+
+def _preserve_block(results: list[dict], target: Target, base: str) -> str:
+    """Show the exact code the model deleted, so the retry can keep it."""
+    from .indexer import py_items
+    syms = next((r.get("symbols", []) for r in results if r["id"] == "collateral"), [])
+    blocks = []
+    for s in syms[:4]:
+        src = gitutil.show(target.root, base, s["file"])
+        if src is None or not s["file"].endswith(".py"):
+            continue
+        it = next((i for i in py_items(s["file"], src) if i["name"] == s["name"]), None)
+        if not it:
+            continue
+        lines = src.splitlines()
+        start = it["line"] - len(it.get("decorators", []))
+        blocks.append("\n".join(lines[start - 1:it["end"]]))
+    if not blocks:
+        return ""
+    return ("\nThese existing definitions were deleted. They must stay in the file exactly as below:\n"
+            "```python\n" + "\n\n\n".join(blocks) + "\n```\n"
+            "Add the new code next to them instead of replacing them.")

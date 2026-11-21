@@ -142,6 +142,52 @@ class TestChecks(unittest.TestCase):
         self.assertEqual(r["protected"]["status"], "blocked")
         self.assertEqual(verdict, "blocked")
 
+    def _with_repo_classes(self):
+        """Index with a repository class hierarchy, like RITA's SqlRepository."""
+        import json
+        self.target.ws.mkdir(parents=True, exist_ok=True)
+        items = [
+            {"kind": "class", "name": "Base", "file": "src/repo.py", "sig": "class Base(Generic[T])"},
+            {"kind": "method", "name": "Base.read_all", "file": "src/repo.py", "sig": ""},
+            {"kind": "class", "name": "AlertsRepository", "file": "src/repo.py", "sig": "class AlertsRepository(Base[A, B])"},
+        ]
+        (self.target.ws / "index.json").write_text(json.dumps({"items": items}), encoding="utf-8")
+
+    def test_call_to_missing_method_is_caught(self):
+        # the exact bug from the RITA sample: repo.count() does not exist
+        self._with_repo_classes()
+        (self.root / "src" / "stats.py").write_text(
+            "def mean(xs):\n    return sum(xs) / len(xs)\n\n\ndef variance(xs):\n    return 0\n\n\n"
+            "def get_count(repo: AlertsRepository):\n    return {'count': repo.count()}\n\n\n"
+            "def get_all(repo: AlertsRepository):\n    return repo.read_all()\n", encoding="utf-8")
+        r, verdict = self.run_checks()
+        self.assertEqual(r["calls"]["status"], "fail")
+        self.assertIn("repo.count()", r["calls"]["details"][0])
+        self.assertIn("read_all", r["calls"]["details"][0])   # lists what does exist
+        self.assertEqual(len(r["calls"]["details"]), 1)        # read_all() is fine
+        self.assertEqual(verdict, "fail")
+
+    def test_retry_feedback_contains_deleted_code(self):
+        (self.root / "src" / "stats.py").write_text("def mean(xs):\n    return 1\n", encoding="utf-8")
+        res = checks.run_checks(self.target, self.base, set(), ["src/stats.py"], "fix mean")
+        fb = checks.failure_feedback(res, self.target, self.base)
+        self.assertIn("def variance(xs):", fb)
+        self.assertIn("exactly as below", fb)
+
+    def test_baseline_failing_tests_only_warn(self):
+        (self.root / "src" / "stats.py").write_text(
+            "def mean(xs):\n    return sum(xs) / len(xs)\n\n\ndef variance(xs):\n    return 0\n\n\n"
+            "def mode(xs):\n    return None\n", encoding="utf-8")
+        cmd = 'python -c "raise SystemExit(1)"'
+        res = checks.run_checks(self.target, self.base, set(), ["src/stats.py"], "add mode",
+                                test_cmds=[cmd], baseline={cmd: {"ok": False, "error": "ImportError"}})
+        t = next(r for r in res if r["id"] == "tests")
+        self.assertEqual(t["status"], "warn")
+        self.assertEqual(checks.overall(res), "pass")
+        res = checks.run_checks(self.target, self.base, set(), ["src/stats.py"], "add mode",
+                                test_cmds=[cmd], baseline={cmd: {"ok": True, "error": ""}})
+        self.assertEqual(checks.overall(res), "fail")   # newly broken by the change
+
     def test_clean_change_passes(self):
         (self.root / "src" / "stats.py").write_text(
             "def mean(xs):\n    return sum(xs) / len(xs)\n\n\ndef variance(xs):\n    return 0\n\n\n"

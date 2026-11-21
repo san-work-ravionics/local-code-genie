@@ -103,14 +103,24 @@ def build_context(target: Target, settings: dict, task: str, code: list[dict],
     return text
 
 
+INSERT_GUIDE = (
+    "- How to ADD code with SEARCH/REPLACE: SEARCH for 2-4 existing lines next to where the new code "
+    "belongs (for example the `@router...` line and `def` line of an existing function). In REPLACE, "
+    "write your new code, then repeat those SEARCH lines unchanged (or the other way round). "
+    "Every line in SEARCH must also appear in REPLACE; never use REPLACE to drop existing code.")
+
+
 def task_message(task: str, editable: list[str], feedback: str | None = None,
-                 escalated_from_local: bool = False) -> str:
+                 escalated_from_local: bool = False, edit_format: str = "diff") -> str:
     msg = [task.strip(), "",
            "Constraints:",
            f"- Edit only: {', '.join(editable)}." if editable else "- Keep the change minimal.",
            "- Reuse the existing helpers, styles and patterns listed in the genie context file.",
+           "- Call only methods that already exist (see the context file), or add them in this change.",
            "- Do not remove or rename existing code the task does not mention.",
            "- Keep the change minimal and consistent with the project conventions."]
+    if edit_format == "diff":
+        msg.append(INSERT_GUIDE)
     if feedback:
         who = "A previous attempt (by a smaller local model)" if escalated_from_local else "Your previous attempt"
         msg += ["", f"{who} was rejected by automated checks:", feedback,

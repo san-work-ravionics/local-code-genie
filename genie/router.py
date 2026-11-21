@@ -15,7 +15,7 @@ from pathlib import Path
 
 from . import gitutil
 from .aider import ensure_ollama, run_aider
-from .checks import changed_files, failure_feedback, overall, run_checks
+from .checks import changed_files, failure_feedback, overall, run_checks, run_tests, tests_for
 from .config import Target
 from .context import build_context, choose_files, estimate_tokens, task_message
 from .indexer import load_index, match_any
@@ -210,6 +210,20 @@ def _execute(run: Run, target: Target, settings: dict, task: str, local_only: bo
             attempts.append(("remote", rem["model"], rem["edit_format"]))
 
     editable_abs = [root / f for f in d["editable"]]
+
+    # Tests: explicit --test, else [[test_map]] for the files being edited, else checks.test_cmd.
+    # Run them once now (tree == base) so a test that was already failing isn't blamed on the model.
+    test_cmds = [test_cmd] if test_cmd else (
+        tests_for(target, d["editable"]) or [c for c in [target.section("checks").get("test_cmd", "")] if c])
+    baseline: dict = {}
+    if test_cmds:
+        st = run.step("baseline tests", detail=", ".join(test_cmds))
+        baseline = run_tests(target, test_cmds)
+        d["baseline_tests"] = {c: {"ok": r["ok"], "error": r["error"]} for c, r in baseline.items()}
+        bad = [c for c, r in baseline.items() if not r["ok"]]
+        run.end_step(st, "warn" if bad else "done",
+                     ("already failing before any change: " + "; ".join(
+                         f"{c} ({baseline[c]['error'][:100]})" for c in bad)) if bad else "all passing")
     final = "fail"
     feedback = None
     ollama_ok = None
@@ -230,7 +244,7 @@ def _execute(run: Run, target: Target, settings: dict, task: str, local_only: bo
                 d["escalated"] = True
                 d["decisions"].append(f"Escalated to {model} after {n - 1} failed local attempt(s)")
             msg = task_message(task, d["editable"], feedback,
-                               escalated_from_local=(kind == "remote" and n > 1))
+                               escalated_from_local=(kind == "remote" and n > 1), edit_format=fmt)
             if kind == "remote":
                 gate = _remote_gate(target, ctx_path, editable_abs, msg)
                 d["remote_payload"] = gate
@@ -253,7 +267,7 @@ def _execute(run: Run, target: Target, settings: dict, task: str, local_only: bo
                 run.end_step(st, "cancelled", "Cancelled by user")
                 break
             checks = run_checks(target, base, pre_untracked, d["editable"], task,
-                                allow_new=bool(d["new_files"]), test_cmd=test_cmd)
+                                allow_new=bool(d["new_files"]), test_cmds=test_cmds, baseline=baseline)
             verdict = overall(checks)
             d["attempts"].append({"n": n, "kind": kind, "model": model, "edit_format": fmt,
                                   "message": msg, "aider": res, "checks": checks, "verdict": verdict})
@@ -261,7 +275,7 @@ def _execute(run: Run, target: Target, settings: dict, task: str, local_only: bo
             if verdict in {"pass", "blocked"}:
                 final = verdict
                 break
-            feedback = failure_feedback(checks)
+            feedback = failure_feedback(checks, target, base)
     finally:
         _finalize(run, target, task, base, pre_untracked, branch, orig)
 
