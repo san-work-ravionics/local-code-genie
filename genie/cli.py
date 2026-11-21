@@ -23,6 +23,8 @@ def _print_plan(d: dict) -> None:
     e = d["estimate"]
     print(f"Size:      ~{e['needed_tokens']} tokens needed / {e['local_budget']} local context")
     print(f"Route:     {d['planned_route']}")
+    if d.get("edit_mode"):
+        print(f"Edit mode: {d['edit_mode']} ({d.get('edit_mode_why', '')})")
     for r in d["escalation_reasons"]:
         print(f"  - escalate because {r}")
     for x in d["decisions"]:
@@ -88,7 +90,7 @@ def cmd_task(a) -> None:
     t = load_target(a.target)
     s = load_settings()
     run = run_task(t, s, a.task, files=a.file, local_only=a.local_only, force_remote=a.remote,
-                   dry_run=a.dry_run, fast=a.fast, test_cmd=a.test, run_id=a.run_id)
+                   dry_run=a.dry_run, fast=a.fast, test_cmd=a.test, run_id=a.run_id, mode=a.mode)
     d = run.data
     _print_plan(d)
     if a.dry_run:
@@ -231,6 +233,8 @@ def main(argv: list[str] | None = None) -> None:
     x.add_argument("--fast", action="store_true", help="use the small fast local model")
     x.add_argument("--dry-run", action="store_true", help="plan only: show context and route")
     x.add_argument("--test", help="test command to run as a check, e.g. 'python -m pytest -q tests/unit/x.py'")
+    x.add_argument("--mode", choices=["insert", "diff"],
+                   help="insert: model writes only new code and genie places it; diff: Aider edits (default: auto)")
     x.add_argument("--run-id", help=argparse.SUPPRESS)  # set by the UI so it can follow the run
     x.set_defaults(fn=cmd_task)
 

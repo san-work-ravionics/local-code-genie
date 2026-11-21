@@ -107,6 +107,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
         <label><input type="checkbox" id="nt-local"> Local only</label>
         <label><input type="checkbox" id="nt-fast"> Fast (3B)</label>
         <label><input type="checkbox" id="nt-remote"> Remote first</label>
+        <label>Edit mode <select id="nt-mode"><option value="">auto</option><option value="insert">insert</option><option value="diff">diff</option></select></label>
       </div>
       <div class="row"><button class="primary" type="submit" id="nt-go">Run</button><span class="muted" id="nt-msg"></span></div>
     </form>
@@ -261,6 +262,7 @@ async function select(id) {
         ${d.unknown_terms && d.unknown_terms.length ? `<li class="muted">Terms not found anywhere in the repo: ${esc(d.unknown_terms.join(", "))}</li>` : ""}
       </ul>
       <div class="muted">Files to edit: ${d.editable.map(x => `<code>${esc(x)}</code>`).join(", ") || "none"}</div>
+      ${d.edit_mode ? `<div class="muted">Edit mode: <b>${esc(d.edit_mode)}</b> · ${esc(d.edit_mode_why || "")}</div>` : ""}
     </div>
     ${running ? `<div class="card"><h2>Live model output <span class="muted" id="live-name"></span></h2><pre class="live" id="live">Waiting for output…</pre></div>` : ""}
     <div class="card"><h2>Timeline</h2><div class="steps">${(d.steps || []).map(s => `
@@ -269,7 +271,9 @@ async function select(id) {
     ${(d.attempts || []).map(a => `
       <div class="card"><h2>Attempt ${a.n}: ${esc(a.kind)} <span class="chip s-${esc(a.verdict)}">${esc(a.verdict)}</span></h2>
         <div class="muted">${esc(a.model)} · ${esc(a.edit_format)} format · ${esc(a.aider.seconds)}s · tokens ${esc(a.aider.tokens_sent || "?")} sent / ${esc(a.aider.tokens_received || "?")} received${a.aider.cost_usd ? ` · ${money(a.aider.cost_usd)}` : ""}${a.aider.timed_out ? " · timed out" : ""}</div>
+        ${a.aider.placement && a.aider.placement.length ? `<h3>Where genie placed the code</h3><ul class="tight">${a.aider.placement.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
         ${checksTable(a.checks)}
+        ${a.aider.generated ? `<details><summary>Code the model wrote</summary><pre>${esc(a.aider.generated)}</pre></details>` : ""}
         <details><summary>Prompt sent with this attempt</summary><pre>${esc(a.message)}</pre></details>
       </div>`).join("")}
     ${d.remote_payload ? `<div class="card"><h2>What was sent to the remote model</h2>
@@ -299,7 +303,7 @@ async function select(id) {
     try {
       const o = d.options || {};
       await startTask({ task: d.task, files: (o.files && o.files.length) ? o.files : d.editable,
-        local_only: o.local_only, remote: o.remote, fast: o.fast, test: o.test_cmd });
+        local_only: o.local_only, remote: o.remote, fast: o.fast, test: o.test_cmd, mode: o.mode });
     } catch (e) { $("#actmsg").innerHTML = `<div class="msg s-fail">${esc(e.message)}</div>`; }
   };
   if (running) refreshLive(id);
@@ -317,6 +321,7 @@ $("#newtask").onsubmit = async (e) => {
       test: $("#nt-test").value.trim(),
       dry_run: $("#nt-dry").checked, local_only: $("#nt-local").checked,
       fast: $("#nt-fast").checked, remote: $("#nt-remote").checked,
+      mode: $("#nt-mode").value || undefined,
     });
     $("#nt-task").value = "";
   } catch (err) { $("#nt-msg").textContent = err.message; }

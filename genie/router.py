@@ -11,13 +11,16 @@ Safety model for the target repo:
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from . import gitutil
 from .aider import ensure_ollama, run_aider
 from .checks import changed_files, failure_feedback, overall, run_checks, run_tests, tests_for
 from .config import Target
-from .context import build_context, choose_files, estimate_tokens, task_message
+from .context import build_context, choose_files, estimate_tokens, insert_prompt, task_message
+from .generate import INSERT_SYSTEM, generate
+from .placer import extract_code, place_python
 from .indexer import load_index, match_any
 from .runlog import Run, RunLock
 from .search import CODE_KINDS, DOC_KINDS, Searcher
@@ -25,6 +28,22 @@ from .secretscan import scan_text, sensitive_path
 
 AIDER_OVERHEAD_TOKENS = 1500   # Aider system prompt + edit-format instructions
 OUTPUT_RESERVE_TOKENS = 1200
+
+ADD_RX = re.compile(r"\b(add|adds|adding|create|new|implement|introduce|expose)\b", re.I)
+MODIFY_RX = re.compile(r"\b(fix|change|modify|rename|remove|delete|update|refactor|replace|rewrite|move)\b", re.I)
+
+
+def choose_edit_mode(task: str, editable: list[str], root: Path, requested: str | None = None) -> tuple[str, str]:
+    """'insert' (model writes only new code, genie places it) or 'diff' (Aider edits)."""
+    if requested in {"insert", "diff"}:
+        return requested, f"requested with --mode {requested}"
+    if len(editable) != 1 or not editable[0].endswith(".py") or not (root / editable[0]).exists():
+        return "diff", "insert mode needs exactly one existing Python file"
+    if MODIFY_RX.search(task):
+        return "diff", "the task changes existing code"
+    if ADD_RX.search(task):
+        return "insert", "the task adds new code: the model writes only the new code and genie places it"
+    return "diff", "the task does not look like a pure addition"
 
 
 def remote_available(settings: dict) -> tuple[bool, str]:
@@ -45,7 +64,8 @@ def _norm_file(target: Target, f: str) -> str:
 
 
 def plan_task(target: Target, settings: dict, task: str, files: list[str] | None = None,
-              force_remote: bool = False, local_only: bool = False, fast: bool = False) -> dict:
+              force_remote: bool = False, local_only: bool = False, fast: bool = False,
+              mode: str | None = None) -> dict:
     index = load_index(target)
     s = Searcher(index["items"])
     code = s.search(task, k=12, kinds=CODE_KINDS)
@@ -60,10 +80,12 @@ def plan_task(target: Target, settings: dict, task: str, files: list[str] | None
 
     ctx = build_context(target, settings, task, code, docs, editable)
     loc = settings["local"]
+    edit_mode, edit_mode_why = choose_edit_mode(task, editable, target.root, mode)
     fmt = loc["fast_edit_format"] if fast else loc["edit_format"]
     file_tokens = sum(estimate_tokens((target.root / f).read_text(encoding="utf-8", errors="replace"))
                       for f in editable if (target.root / f).exists())
-    factor = 2.0 if fmt == "whole" else 1.3   # "whole" must echo the full file back
+    # "whole" must echo the full file back; insert mode only returns the new code
+    factor = 1.0 if edit_mode == "insert" else (2.0 if fmt == "whole" else 1.3)
     need = int(estimate_tokens(ctx) + file_tokens * factor + loc["map_tokens"]
                + AIDER_OVERHEAD_TOKENS + OUTPUT_RESERVE_TOKENS)
     budget = loc["context_tokens"]
@@ -110,7 +132,7 @@ def plan_task(target: Target, settings: dict, task: str, files: list[str] | None
 
     return {
         "code_matches": code, "doc_matches": docs, "coverage": coverage, "unknown_terms": unknown,
-        "named_symbols": named,
+        "named_symbols": named, "edit_mode": edit_mode, "edit_mode_why": edit_mode_why,
         "editable": editable, "new_files": new_files, "context": ctx,
         "estimate": {"needed_tokens": need, "local_budget": budget, "context_tokens": estimate_tokens(ctx),
                      "file_tokens": file_tokens},
@@ -129,14 +151,15 @@ def _reset_to_base(root: Path, base: str, pre_untracked: set[str]) -> None:
 
 def run_task(target: Target, settings: dict, task: str, files: list[str] | None = None,
              local_only: bool = False, force_remote: bool = False, dry_run: bool = False,
-             fast: bool = False, test_cmd: str | None = None, run_id: str | None = None) -> Run:
+             fast: bool = False, test_cmd: str | None = None, run_id: str | None = None,
+             mode: str | None = None) -> Run:
     options = {"files": files or [], "local_only": local_only, "remote": force_remote,
-               "dry_run": dry_run, "fast": fast, "test_cmd": test_cmd}
+               "dry_run": dry_run, "fast": fast, "test_cmd": test_cmd, "mode": mode}
     run = Run.create(target, task, options, rid=run_id)
     d = run.data
 
     st = run.step("retrieve", detail="Search the index for reusable code and docs")
-    plan = plan_task(target, settings, task, files, force_remote, local_only, fast)
+    plan = plan_task(target, settings, task, files, force_remote, local_only, fast, mode)
     run.write("context.md", plan.pop("context"))
     trim = lambda ms: [{k: m.get(k) for k in ("kind", "name", "file", "line", "sig", "doc", "score",  # noqa: E731
                                               "coverage", "matched")} for m in ms]
@@ -147,7 +170,8 @@ def run_task(target: Target, settings: dict, task: str, files: list[str] | None 
 
     st = run.step("route")
     d["planned_route"] = d["route"]
-    run.end_step(st, detail=f"{d['route']}: " + "; ".join(d["escalation_reasons"] or d["decisions"]))
+    run.end_step(st, detail=f"{d['route']}, {d['edit_mode']} mode: "
+                 + "; ".join(d["escalation_reasons"] or d["decisions"]))
 
     if not d["editable"]:
         d["decisions"].append("No suitable file to edit was found (protected or test files only); pass --file")
@@ -252,24 +276,36 @@ def _execute(run: Run, target: Target, settings: dict, task: str, local_only: bo
                     d["decisions"].append("Remote call blocked: " + "; ".join(gate["reasons"]))
                     run.save()
                     break
-            st = run.step(f"attempt {n}: {kind}", detail=model)
-            res = run_aider(
-                settings=settings, cwd=target.workdir, model=model, edit_format=fmt,
-                files=editable_abs, read_files=[ctx_path], message=msg, run_dir=run.dir,
-                tag=f"attempt{n}", timeout_s=(rem if kind == "remote" else loc)["timeout_s"],
-                map_tokens=loc["map_tokens"] if (kind == "local" or rem.get("send_repo_map")) else 0,
-                cancel_path=cancel_path,
-            )
+            insert = kind == "local" and d["edit_mode"] == "insert"
+            label = "insert" if insert else fmt
+            st = run.step(f"attempt {n}: {kind}", detail=f"{model} ({'insert mode' if insert else fmt + ' edit'})")
+            placement_error = None
+            if insert:
+                msg = insert_prompt(ctx_path.read_text(encoding="utf-8"), d["editable"][0],
+                                    (root / d["editable"][0]).read_text(encoding="utf-8-sig"), task, feedback)
+                res, placement_error = _insert_attempt(run, target, settings, model, n, msg, task,
+                                                       cancel_path)
+            else:
+                res = run_aider(
+                    settings=settings, cwd=target.workdir, model=model, edit_format=fmt,
+                    files=editable_abs, read_files=[ctx_path], message=msg, run_dir=run.dir,
+                    tag=f"attempt{n}", timeout_s=(rem if kind == "remote" else loc)["timeout_s"],
+                    map_tokens=loc["map_tokens"] if (kind == "local" or rem.get("send_repo_map")) else 0,
+                    cancel_path=cancel_path,
+                )
             if res.get("cancelled"):
                 d["cancelled"] = True
-                d["attempts"].append({"n": n, "kind": kind, "model": model, "edit_format": fmt,
+                d["attempts"].append({"n": n, "kind": kind, "model": model, "edit_format": label,
                                       "message": msg, "aider": res, "checks": [], "verdict": "cancelled"})
                 run.end_step(st, "cancelled", "Cancelled by user")
                 break
-            checks = run_checks(target, base, pre_untracked, d["editable"], task,
-                                allow_new=bool(d["new_files"]), test_cmds=test_cmds, baseline=baseline)
+            if placement_error:
+                checks = [{"id": "placement", "status": "fail", "summary": placement_error, "details": []}]
+            else:
+                checks = run_checks(target, base, pre_untracked, d["editable"], task,
+                                    allow_new=bool(d["new_files"]), test_cmds=test_cmds, baseline=baseline)
             verdict = overall(checks)
-            d["attempts"].append({"n": n, "kind": kind, "model": model, "edit_format": fmt,
+            d["attempts"].append({"n": n, "kind": kind, "model": model, "edit_format": label,
                                   "message": msg, "aider": res, "checks": checks, "verdict": verdict})
             run.end_step(st, verdict, f"{model}: {verdict} in {res.get('seconds')} s")
             if verdict in {"pass", "blocked"}:
@@ -297,6 +333,37 @@ def _execute(run: Run, target: Target, settings: dict, task: str, local_only: bo
     d["result"]["seconds"] = round(sum(a["aider"].get("seconds", 0) for a in d["attempts"]), 1)
     run.save()
     return run
+
+
+def _insert_attempt(run: Run, target: Target, settings: dict, model: str, n: int, prompt: str,
+                    task: str, cancel_path: Path) -> tuple[dict, str | None]:
+    """Insert mode: the model returns only new code; genie places it (placer.py)."""
+    rel = run.data["editable"][0]
+    path = target.root / rel
+    raw = path.read_bytes()
+    bom = raw.startswith(b"\xef\xbb\xbf")
+    crlf = b"\r\n" in raw
+    src = raw.decode("utf-8-sig", errors="replace").replace("\r\n", "\n")
+    res = generate(settings=settings, model=model, system=INSERT_SYSTEM, user=prompt,
+                   log_path=run.dir / f"attempt{n}.out.log",
+                   timeout_s=settings["local"]["timeout_s"], cancel_path=cancel_path)
+    res["applied"] = []
+    if res.get("cancelled"):
+        return res, None
+    if not res["ok"]:
+        return res, "the model call failed: " + "; ".join(res["errors"] or ["timed out"])
+    code = extract_code(res["text"])
+    res["generated"] = code
+    if not code:
+        return res, "the reply contained no ```python code block"
+    pl = place_python(src, code, task)
+    res["placement"] = pl.notes
+    if not pl.ok:
+        return res, f"genie could not place the code: {pl.error}"
+    text = pl.new_src.replace("\n", "\r\n") if crlf else pl.new_src
+    path.write_bytes((b"\xef\xbb\xbf" if bom else b"") + text.encode("utf-8"))
+    res["applied"] = [rel]
+    return res, None
 
 
 def _remote_gate(target: Target, ctx_path: Path, files: list[Path], msg: str) -> dict:

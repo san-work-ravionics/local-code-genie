@@ -128,5 +128,19 @@ def task_message(task: str, editable: list[str], feedback: str | None = None,
     return "\n".join(msg)
 
 
+def insert_prompt(context_text: str, rel: str, src: str, task: str, feedback: str | None = None) -> str:
+    """Prompt for insert mode: the model sees the file but answers with new code only."""
+    lang = LANG.get(Path(rel).suffix.lower(), "")
+    parts = [context_text.strip(), "",
+             f"## The file you are adding to: `{rel}` (for reference; do not repeat it)",
+             f"```{lang}\n{src.rstrip()}\n```", "",
+             "## Task", task.strip(), ""]
+    if feedback:
+        parts += ["## Your previous answer was rejected by automated checks", feedback, "",
+                  "Write a corrected version of the NEW code only.", ""]
+    parts.append("Reply with only the new code in one ```python block.")
+    return "\n".join(parts)
+
+
 def estimate_tokens(text: str) -> int:
     return len(text) // 4 + 1

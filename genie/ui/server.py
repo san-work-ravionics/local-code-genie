@@ -105,6 +105,8 @@ def spawn_task(target_name: str, body: dict) -> str:
     for flag in ("dry_run", "local_only", "remote", "fast"):
         if body.get(flag):
             args.append("--" + flag.replace("_", "-"))
+    if body.get("mode") in {"insert", "diff"}:
+        args += ["--mode", body["mode"]]
     if str(body.get("test") or "").strip():
         args += ["--test", str(body["test"]).strip()]
     run_dir = t.runs_dir / rid

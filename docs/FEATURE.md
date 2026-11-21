@@ -24,7 +24,16 @@ The local models pass tests but change things outside the request: they deleted 
 - `genie task "…" --dry-run` to see the plan → `genie task "…"` → review in `genie ui` → accept/reject
 - `--local-only`, `--remote`, `--fast`, `--test "<cmd>"`
 
+- [x] Insert mode ("generate, then place") for Python: the model writes only the new code; genie places it with fixed AST rules (imports, FastAPI fixed-before-param routes, methods into classes) and can never delete existing lines. Chosen automatically for "add" tasks on one Python file.
+- [x] `calls` check (methods on typed objects must exist), deleted-code retry feedback, per-area tests with baseline
+
+## Lessons from the first RITA sample (2026-11-21)
+- qwen2.5-coder 7B writes correct new code but cannot reliably *insert* with SEARCH/REPLACE: it replaced an existing endpoint in 4 of 4 attempts, even when shown the code to keep.
+- Insert mode removes that failure class: on the bench task it passed first try in 64 s (Aider diff: 106 s).
+- RITA's unit tests cannot import (`.gitignore` `*token*` excludes `schemas/token_forecast.py`), so test checks only warn there.
+
 ## Roadmap
+- [ ] Insert mode for JS and CSS
 - [ ] Choose the remote provider and set the API key (default: Anthropic via litellm)
 - [ ] Semantic search (MiniLM embeddings are already cached locally) alongside BM25
 - [ ] Architect mode for remote (remote plans, local edits) as an option
