@@ -275,6 +275,49 @@ def _methods_of(cls: str, bases: dict, methods: dict, seen: set | None = None) -
     return out
 
 
+def class_api(items: list[dict], src: str) -> dict[str, list[str]]:
+    """Public methods (with signatures, incl. inherited) of the in-repo classes a file uses
+    as type annotations or constructors. This tells the model what it can call."""
+    bases, _methods = _class_table(items)
+    sigs: dict[str, dict[str, str]] = {}
+    for it in items:
+        if it["kind"] == "method" and it["file"].endswith(".py"):
+            parts = it["name"].split(".")
+            sigs.setdefault(parts[-2], {})[parts[-1]] = it.get("sig", parts[-1])
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return {}
+    used: list[str] = []
+    for node in ast.walk(tree):
+        names = []
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            names = [_ann_name(a.annotation) for a in node.args.args + node.args.kwonlyargs if a.annotation]
+            if node.returns is not None:
+                names.append(_ann_name(node.returns))
+        elif isinstance(node, ast.Call):
+            names = [_ann_name(node.func)]
+        for n in names:
+            if n and n in bases and n not in used:
+                used.append(n)
+    out: dict[str, list[str]] = {}
+    for cls in used:
+        seen: dict[str, str] = {}
+        stack, visited = [cls], set()
+        while stack:
+            c = stack.pop(0)
+            if c in visited or c not in bases:
+                continue
+            visited.add(c)
+            for m, sig in sigs.get(c, {}).items():
+                if not m.startswith("_") and m not in seen:
+                    seen[m] = sig.replace("self, ", "").replace("(self)", "()")
+            stack.extend(b for b in bases[c] if b not in GENERIC_BASES)
+        if seen:
+            out[cls] = [seen[m] for m in sorted(seen)]
+    return out
+
+
 def _ann_name(node) -> str | None:
     if isinstance(node, ast.Name):
         return node.id

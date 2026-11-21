@@ -16,7 +16,8 @@ from pathlib import Path
 
 from . import gitutil
 from .aider import ensure_ollama, run_aider
-from .checks import changed_files, failure_feedback, overall, run_checks, run_tests, tests_for
+from .checks import (changed_files, class_api, failure_feedback, overall, run_checks, run_tests,
+                     tests_for)
 from .config import Target
 from .context import build_context, choose_files, estimate_tokens, insert_prompt, task_message
 from .generate import INSERT_SYSTEM, generate
@@ -78,7 +79,12 @@ def plan_task(target: Target, settings: dict, task: str, files: list[str] | None
     editable = user_files or choose_files([m for m in code if not match_any(m["file"], protected)], 1, task)
     new_files = [f for f in editable if not (target.root / f).exists()]
 
-    ctx = build_context(target, settings, task, code, docs, editable)
+    api: dict[str, list[str]] = {}
+    for f in editable:
+        p = target.root / f
+        if f.endswith(".py") and p.exists():
+            api.update(class_api(index["items"], p.read_text(encoding="utf-8-sig", errors="replace")))
+    ctx = build_context(target, settings, task, code, docs, editable, class_api=api)
     loc = settings["local"]
     edit_mode, edit_mode_why = choose_edit_mode(task, editable, target.root, mode)
     fmt = loc["fast_edit_format"] if fast else loc["edit_format"]
@@ -133,6 +139,7 @@ def plan_task(target: Target, settings: dict, task: str, files: list[str] | None
     return {
         "code_matches": code, "doc_matches": docs, "coverage": coverage, "unknown_terms": unknown,
         "named_symbols": named, "edit_mode": edit_mode, "edit_mode_why": edit_mode_why,
+        "class_api": api,
         "editable": editable, "new_files": new_files, "context": ctx,
         "estimate": {"needed_tokens": need, "local_budget": budget, "context_tokens": estimate_tokens(ctx),
                      "file_tokens": file_tokens},
@@ -250,6 +257,7 @@ def _execute(run: Run, target: Target, settings: dict, task: str, local_only: bo
                          f"{c} ({baseline[c]['error'][:100]})" for c in bad)) if bad else "all passing")
     final = "fail"
     feedback = None
+    bad_names: set[str] = set()
     ollama_ok = None
     try:
         for n, (kind, model, fmt) in enumerate(attempts, 1):
@@ -281,7 +289,11 @@ def _execute(run: Run, target: Target, settings: dict, task: str, local_only: bo
             st = run.step(f"attempt {n}: {kind}", detail=f"{model} ({'insert mode' if insert else fmt + ' edit'})")
             placement_error = None
             if insert:
-                msg = insert_prompt(ctx_path.read_text(encoding="utf-8"), d["editable"][0],
+                ctx_text = ctx_path.read_text(encoding="utf-8")
+                if bad_names:   # don't keep suggesting what the model wrongly used
+                    ctx_text = "\n".join(ln for ln in ctx_text.splitlines()
+                                         if not (ln.startswith("- `") and any(b in ln for b in bad_names)))
+                msg = insert_prompt(ctx_text, d["editable"][0],
                                     (root / d["editable"][0]).read_text(encoding="utf-8-sig"), task, feedback)
                 res, placement_error = _insert_attempt(run, target, settings, model, n, msg, task,
                                                        cancel_path)
@@ -312,6 +324,9 @@ def _execute(run: Run, target: Target, settings: dict, task: str, local_only: bo
                 final = verdict
                 break
             feedback = failure_feedback(checks, target, base)
+            for c in checks:
+                if c["id"] == "calls" and c["status"] == "fail":
+                    bad_names |= {m.group(1) for dd in c["details"] for m in [re.search(r"\.(\w+)\(\)`", dd)] if m}
     finally:
         _finalize(run, target, task, base, pre_untracked, branch, orig)
 

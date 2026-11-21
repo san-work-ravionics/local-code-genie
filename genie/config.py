@@ -45,7 +45,7 @@ DEFAULTS: dict = {
         "local_retries": 1,
         "max_local_files": 2,
     },
-    "context": {"max_chars": 9000, "snippets": 3, "doc_sections": 2},
+    "context": {"max_chars": 12000, "snippets": 3, "doc_sections": 2},
     "aider": {"exe": r"%USERPROFILE%\.local\bin\aider.exe"},
     "ui": {"host": "127.0.0.1", "port": 8765},
     "costs": {"currency": "EUR", "usd_to_eur": 0.92},
@@ -67,8 +67,8 @@ def _merge(base: dict, extra: dict) -> dict:
 
 
 def _load(path: Path) -> dict:
-    with open(path, "rb") as f:
-        return tomllib.load(f)
+    # utf-8-sig: Notepad and PowerShell 5.1 often save with a BOM, which tomllib rejects
+    return tomllib.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def expand(p: str) -> str:

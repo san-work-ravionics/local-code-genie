@@ -23,7 +23,7 @@ local_retries = 1     # local attempts after the first, before escalating
 max_local_files = 2
 
 [context]
-max_chars = 9000      # about 2.3k tokens of conventions + reusable code + docs
+max_chars = 12000     # about 3k tokens of conventions + class APIs + related code + docs
 snippets = 3
 doc_sections = 2
 
