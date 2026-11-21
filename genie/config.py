@@ -48,7 +48,12 @@ DEFAULTS: dict = {
     "context": {"max_chars": 9000, "snippets": 3, "doc_sections": 2},
     "aider": {"exe": r"%USERPROFILE%\.local\bin\aider.exe"},
     "ui": {"host": "127.0.0.1", "port": 8765},
+    "costs": {"currency": "EUR", "usd_to_eur": 0.92},
 }
+
+
+def to_eur(usd: float | None, settings: dict) -> float:
+    return round((usd or 0.0) * float(settings["costs"]["usd_to_eur"]), 4)
 
 
 def _merge(base: dict, extra: dict) -> dict:

@@ -67,6 +67,7 @@ def stats(runs: list[dict]) -> dict:
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "genie-ui"
+    costs = {"currency": "EUR", "usd_to_eur": 0.92}
 
     def log_message(self, fmt, *args):  # quiet
         pass
@@ -112,7 +113,8 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/runs":
                 t = self._target(q)
                 runs = list_runs(t)
-                self._json({"runs": [_summary(r) for r in runs], "stats": stats(runs)})
+                self._json({"runs": [_summary(r) for r in runs], "stats": stats(runs),
+                            "costs": self.costs})
             elif u.path == "/api/run":
                 t = self._target(q)
                 rid = (q.get("id") or [""])[0]
@@ -123,7 +125,7 @@ class Handler(BaseHTTPRequestHandler):
                 for name in ("diff.patch", "context.md"):
                     p = run.dir / name
                     extra[name] = p.read_text(encoding="utf-8") if p.exists() else None
-                self._json({"run": run.data, "files": extra})
+                self._json({"run": run.data, "files": extra, "costs": self.costs})
             else:
                 self._json({"error": "not found"}, 404)
         except (ValueError, SystemExit) as e:
@@ -156,6 +158,7 @@ class Handler(BaseHTTPRequestHandler):
 def serve(settings: dict, port: int | None = None, open_browser: bool = True) -> None:
     host = settings["ui"]["host"]
     port = port or settings["ui"]["port"]
+    Handler.costs = dict(settings["costs"])
     httpd = ThreadingHTTPServer((host, port), Handler)
     url = f"http://{host}:{port}/"
     print(f"genie UI on {url}  (Ctrl+C to stop)")

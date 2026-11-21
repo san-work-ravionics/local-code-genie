@@ -91,7 +91,10 @@ details summary { cursor: pointer; color: var(--accent); margin: 6px 0; }
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const pct = (x) => x == null ? "–" : Math.round(x * 100) + "%";
-let state = { target: null, selected: null, runs: [] };
+let state = { target: null, selected: null, runs: [], costs: { currency: "EUR", usd_to_eur: 0.92 } };
+// Costs are stored in USD (as Aider reports them) and shown in the configured currency.
+const money = (usd) => new Intl.NumberFormat("nl-NL", { style: "currency", currency: state.costs.currency,
+  minimumFractionDigits: 2, maximumFractionDigits: 4 }).format((usd || 0) * (state.costs.currency === "EUR" ? state.costs.usd_to_eur : 1));
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -114,7 +117,7 @@ function tiles(s) {
     ["Solved locally", s.solved_local, `escalated / remote: ${s.solved_remote}`],
     ["Attempt pass rate", Object.entries(s.attempt_pass_rate).map(([k, v]) => `${k} ${v}`).join("  ") || "–", ""],
     ["Avg attempt time", Object.entries(s.avg_seconds).map(([k, v]) => `${k} ${v}s`).join("  ") || "–", ""],
-    ["Remote spend", "$" + (s.remote_cost_usd || 0).toFixed(3), ""],
+    ["Remote spend", money(s.remote_cost_usd), `at ${state.costs.usd_to_eur} EUR per USD`],
     ["Top failing checks", Object.entries(s.checks_failed).slice(0, 3).map(([k, v]) => `${k} ${v}`).join(" · ") || "none", ""],
     ["Escalation reasons", Object.entries(s.escalation_reasons).slice(0, 2).map(([k, v]) => `${k} (${v})`).join(" · ") || "none", ""],
   ];
@@ -125,6 +128,7 @@ async function loadRuns() {
   if (!state.target) return;
   const j = await api(`/api/runs?target=${encodeURIComponent(state.target)}`);
   state.runs = j.runs;
+  if (j.costs) state.costs = j.costs;
   tiles(j.stats);
   if (!j.runs.length) {
     $("#list").innerHTML = `<div class="empty">No runs yet. Try <code>genie task "…" --dry-run</code>.</div>`;
@@ -138,7 +142,7 @@ async function loadRuns() {
         <span>${esc(r.route || r.planned_route || "")}</span>
         <span>coverage ${pct(r.coverage)}</span>
         ${r.seconds ? `<span>${r.seconds}s</span>` : ""}
-        ${r.cost ? `<span>$${r.cost.toFixed(3)}</span>` : ""}
+        ${r.cost ? `<span>${money(r.cost)}</span>` : ""}
         <span>${esc((r.created || "").replace("T", " "))}</span>
       </div>
     </div>`).join("");
@@ -193,7 +197,7 @@ async function select(id) {
       <div class="muted">${esc(s.detail)}</div></div>`).join("")}</div></div>
     ${(d.attempts || []).map(a => `
       <div class="card"><h2>Attempt ${a.n}: ${esc(a.kind)} <span class="chip s-${esc(a.verdict)}">${esc(a.verdict)}</span></h2>
-        <div class="muted">${esc(a.model)} · ${esc(a.edit_format)} format · ${esc(a.aider.seconds)}s · tokens ${esc(a.aider.tokens_sent || "?")} sent / ${esc(a.aider.tokens_received || "?")} received${a.aider.cost_usd ? ` · $${a.aider.cost_usd}` : ""}${a.aider.timed_out ? " · timed out" : ""}</div>
+        <div class="muted">${esc(a.model)} · ${esc(a.edit_format)} format · ${esc(a.aider.seconds)}s · tokens ${esc(a.aider.tokens_sent || "?")} sent / ${esc(a.aider.tokens_received || "?")} received${a.aider.cost_usd ? ` · ${money(a.aider.cost_usd)}` : ""}${a.aider.timed_out ? " · timed out" : ""}</div>
         ${checksTable(a.checks)}
         <details><summary>Prompt sent with this attempt</summary><pre>${esc(a.message)}</pre></details>
       </div>`).join("")}

@@ -104,6 +104,9 @@ def cmd_task(a) -> None:
                 for x in c["details"][:5]:
                     print(f"            {x}")
     print(f"\nStatus: {d['status']}   Route: {d.get('route')}   Run: {run.id}")
+    usd = d.get("result", {}).get("remote_cost_usd") or 0
+    if usd:
+        print(f"Remote cost: EUR {config.to_eur(usd, s):.4f}")
     if d.get("result", {}).get("error"):
         print("Error:", d["result"]["error"])
     if d["status"] in {"needs_review", "failed", "blocked"} and d.get("branch"):

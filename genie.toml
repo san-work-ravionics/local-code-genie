@@ -30,3 +30,8 @@ doc_sections = 2
 [ui]
 host = "127.0.0.1"
 port = 8765
+
+[costs]
+# Aider reports remote cost in USD. Genie stores USD and displays this currency.
+currency = "EUR"
+usd_to_eur = 0.92     # update as needed
