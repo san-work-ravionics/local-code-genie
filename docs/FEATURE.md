@@ -28,7 +28,7 @@ The local models pass tests but change things outside the request: they deleted 
 - [ ] Choose the remote provider and set the API key (default: Anthropic via litellm)
 - [ ] Semantic search (MiniLM embeddings are already cached locally) alongside BM25
 - [ ] Architect mode for remote (remote plans, local edits) as an option
-- [ ] Start tasks from the UI, with live log streaming
+- [x] Start tasks from the UI (new-task form, "Run this for real" on planned runs), live progress and model output, Cancel (safe: repo restored), one real run per target
 - [ ] Auto-draft `conventions.md` from guardrail/spec files
 - [ ] Tune `min_coverage` and retries from the run statistics
 - [ ] JS syntax check (requires Node, which is not installed)

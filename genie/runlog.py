@@ -16,7 +16,7 @@ from .config import Target
 
 def new_run_id(task: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", task.lower()).strip("-")[:32].strip("-") or "task"
-    return time.strftime("%Y%m%d-%H%M%S") + "-" + slug
+    return time.strftime("%Y%m%d-%H%M%S") + "-" + os.urandom(2).hex() + "-" + slug
 
 
 def now() -> str:
@@ -37,10 +37,11 @@ class Run:
         return self.target.runs_dir / self.id
 
     @classmethod
-    def create(cls, target: Target, task: str, options: dict) -> "Run":
-        rid = new_run_id(task)
+    def create(cls, target: Target, task: str, options: dict, rid: str | None = None) -> "Run":
+        rid = rid or new_run_id(task)
         run = cls(target, {"id": rid, "target": target.name, "task": task, "created": now(),
                            "status": "running", "route": None, "options": options,
+                           "pid": os.getpid(),
                            "steps": [], "attempts": [], "decisions": [], "result": {}})
         run.dir.mkdir(parents=True, exist_ok=True)
         run.save()
@@ -82,6 +83,66 @@ class Run:
         p = self.dir / name
         p.write_text(text, encoding="utf-8")
         return p
+
+
+def pid_alive(pid: int | None) -> bool:
+    """True if a process with this pid is running. Never signals the process."""
+    if not pid:
+        return False
+    if os.name == "nt":
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        ok = k32.GetExitCodeProcess(h, ctypes.byref(code))
+        k32.CloseHandle(h)
+        return bool(ok) and code.value == 259  # STILL_ACTIVE
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except OSError:
+        return False
+
+
+class RunLock:
+    """One real run per target at a time (each run switches branches in the target repo)."""
+
+    def __init__(self, target: Target):
+        self.path = target.ws / ".lock"
+
+    def holder(self) -> int | None:
+        try:
+            pid = int(self.path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            return None
+        return pid if pid_alive(pid) else None
+
+    def acquire(self) -> bool:
+        holder = self.holder()
+        if holder and holder != os.getpid():   # the UI may have claimed it for us already
+            return False
+        self.claim(os.getpid())
+        return True
+
+    def claim(self, pid: int) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(str(pid), encoding="utf-8")
+
+    def release(self) -> None:
+        try:
+            if self.path.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                self.path.unlink()
+        except OSError:
+            pass
+
+
+def effective_status(d: dict) -> str:
+    """'running' runs whose process has died show as 'interrupted'."""
+    if d.get("status") == "running" and not pid_alive(d.get("pid")):
+        return "interrupted"
+    return d.get("status", "")
 
 
 def list_runs(target: Target) -> list[dict]:

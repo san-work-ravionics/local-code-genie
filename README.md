@@ -26,7 +26,7 @@ genie task "<task>" [-f FILE]...   run a task
       --fast                       use the 3B model
       --test "<cmd>"               run tests as a check
 genie runs | show <id> | accept <id> | reject <id>
-genie ui                           dashboard on http://127.0.0.1:8765
+genie ui                           dashboard on http://127.0.0.1:8765 (start tasks, watch live, cancel, accept/reject)
 genie chat [files]                 interactive Aider session with the conventions loaded
 genie doctor                       check the setup
 ```

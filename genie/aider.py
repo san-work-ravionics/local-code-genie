@@ -70,7 +70,8 @@ _COST = re.compile(r"Cost: \$([0-9.]+) message")
 
 def run_aider(*, settings: dict, cwd: Path, model: str, edit_format: str, files: list[Path],
               read_files: list[Path], message: str, run_dir: Path, tag: str, map_tokens: int,
-              timeout_s: int, extra_env: dict | None = None) -> dict:
+              timeout_s: int, extra_env: dict | None = None,
+              cancel_path: Path | None = None) -> dict:
     exe = find_aider(settings)
     if not exe:
         return {"ok": False, "error": "aider not found", "seconds": 0}
@@ -81,7 +82,8 @@ def run_aider(*, settings: dict, cwd: Path, model: str, edit_format: str, files:
         "--map-tokens", str(map_tokens), "--subtree-only",
         "--no-auto-commits", "--no-dirty-commits", "--no-auto-lint", "--no-auto-test",
         "--no-check-update", "--no-show-model-warnings", "--no-show-release-notes",
-        "--analytics-disable", "--no-pretty", "--no-stream", "--no-fancy-input",
+        # --stream writes the model's output to the log as it is generated (live view in the UI)
+        "--analytics-disable", "--no-pretty", "--stream", "--no-fancy-input",
         "--yes-always", "--no-gitignore",
         "--chat-history-file", str(run_dir / f"{tag}.chat.md"),
         "--input-history-file", str(run_dir / f"{tag}.input"),
@@ -99,13 +101,17 @@ def run_aider(*, settings: dict, cwd: Path, model: str, edit_format: str, files:
 
     log_path = run_dir / f"{tag}.out.log"
     t0 = time.time()
-    killed_after_finish = timed_out = False
-    with open(log_path, "w", encoding="utf-8", errors="replace") as log:
+    killed_after_finish = timed_out = cancelled = False
+    with open(log_path, "w", encoding="utf-8", errors="replace", buffering=1) as log:
         proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=log,
                                 stderr=subprocess.STDOUT, env=env)
         finished_at = None
         while proc.poll() is None:
             time.sleep(1)
+            if cancel_path is not None and cancel_path.exists():
+                proc.kill()
+                cancelled = True
+                break
             elapsed = time.time() - t0
             if elapsed > timeout_s:
                 proc.kill()
@@ -129,7 +135,8 @@ def run_aider(*, settings: dict, cwd: Path, model: str, edit_format: str, files:
     cost = _COST.search(out)
     errors = [ln for ln in out.splitlines() if "Error" in ln or "Exception" in ln][:5]
     return {
-        "ok": not timed_out,
+        "ok": not (timed_out or cancelled),
+        "cancelled": cancelled,
         "seconds": round(time.time() - t0, 1),
         "applied": sorted(set(m.strip() for m in _APPLIED.findall(out))),
         "tokens_sent": tok.group(1) if tok else None,

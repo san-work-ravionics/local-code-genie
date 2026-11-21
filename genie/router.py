@@ -19,7 +19,7 @@ from .checks import changed_files, failure_feedback, overall, run_checks
 from .config import Target
 from .context import build_context, choose_files, estimate_tokens, task_message
 from .indexer import load_index, match_any
-from .runlog import Run
+from .runlog import Run, RunLock
 from .search import CODE_KINDS, DOC_KINDS, Searcher
 from .secretscan import scan_text, sensitive_path
 
@@ -129,15 +129,15 @@ def _reset_to_base(root: Path, base: str, pre_untracked: set[str]) -> None:
 
 def run_task(target: Target, settings: dict, task: str, files: list[str] | None = None,
              local_only: bool = False, force_remote: bool = False, dry_run: bool = False,
-             fast: bool = False, test_cmd: str | None = None) -> Run:
+             fast: bool = False, test_cmd: str | None = None, run_id: str | None = None) -> Run:
     options = {"files": files or [], "local_only": local_only, "remote": force_remote,
                "dry_run": dry_run, "fast": fast, "test_cmd": test_cmd}
-    run = Run.create(target, task, options)
+    run = Run.create(target, task, options, rid=run_id)
     d = run.data
 
     st = run.step("retrieve", detail="Search the index for reusable code and docs")
     plan = plan_task(target, settings, task, files, force_remote, local_only, fast)
-    ctx_path = run.write("context.md", plan.pop("context"))
+    run.write("context.md", plan.pop("context"))
     trim = lambda ms: [{k: m.get(k) for k in ("kind", "name", "file", "line", "sig", "doc", "score",  # noqa: E731
                                               "coverage", "matched")} for m in ms]
     d["matches"] = trim(plan.pop("code_matches"))
@@ -161,6 +161,23 @@ def run_task(target: Target, settings: dict, task: str, files: list[str] | None 
         run.save()
         return run
 
+    lock = RunLock(target)
+    if not lock.acquire():
+        d["status"] = "failed"
+        d["result"] = {"error": f"Another genie run is in progress for this target (pid {lock.holder()})"}
+        run.save()
+        return run
+    try:
+        return _execute(run, target, settings, task, local_only, fast, test_cmd)
+    finally:
+        lock.release()
+
+
+def _execute(run: Run, target: Target, settings: dict, task: str, local_only: bool, fast: bool,
+             test_cmd: str | None) -> Run:
+    d = run.data
+    ctx_path = run.dir / "context.md"
+    cancel_path = run.dir / "cancel"
     root = target.root
     dirty = gitutil.tracked_changes(root)
     if dirty:
@@ -198,6 +215,9 @@ def run_task(target: Target, settings: dict, task: str, files: list[str] | None 
     ollama_ok = None
     try:
         for n, (kind, model, fmt) in enumerate(attempts, 1):
+            if cancel_path.exists():
+                d["cancelled"] = True
+                break
             if n > 1:
                 _reset_to_base(root, base, pre_untracked)
             if kind == "local" and ollama_ok is None:
@@ -224,7 +244,14 @@ def run_task(target: Target, settings: dict, task: str, files: list[str] | None 
                 files=editable_abs, read_files=[ctx_path], message=msg, run_dir=run.dir,
                 tag=f"attempt{n}", timeout_s=(rem if kind == "remote" else loc)["timeout_s"],
                 map_tokens=loc["map_tokens"] if (kind == "local" or rem.get("send_repo_map")) else 0,
+                cancel_path=cancel_path,
             )
+            if res.get("cancelled"):
+                d["cancelled"] = True
+                d["attempts"].append({"n": n, "kind": kind, "model": model, "edit_format": fmt,
+                                      "message": msg, "aider": res, "checks": [], "verdict": "cancelled"})
+                run.end_step(st, "cancelled", "Cancelled by user")
+                break
             checks = run_checks(target, base, pre_untracked, d["editable"], task,
                                 allow_new=bool(d["new_files"]), test_cmd=test_cmd)
             verdict = overall(checks)
@@ -243,7 +270,9 @@ def run_task(target: Target, settings: dict, task: str, files: list[str] | None 
         d["route"] = "escalated" if (used[-1] == "remote" and "local" in used) else used[-1]
     elif used:
         d["route"] = "escalated" if ("remote" in used and "local" in used) else used[-1]
-    if not d["attempts"]:
+    if d.get("cancelled"):
+        d["status"] = "cancelled"
+    elif not d["attempts"]:
         d["status"] = "failed"
         d["result"].setdefault("error", "No attempt could run (see decisions)")
     elif d["result"].get("no_changes"):

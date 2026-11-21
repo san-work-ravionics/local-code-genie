@@ -44,7 +44,8 @@ main { display: grid; grid-template-columns: minmax(260px, 380px) 1fr; gap: 12px
 .chip { display: inline-block; padding: 0 7px; border-radius: 10px; font-size: 12px; background: var(--chip); }
 .s-pass, .s-needs_review, .s-accepted, .s-done { background: var(--ok-bg); color: var(--ok); }
 .s-warn, .s-planned, .s-running, .s-no_change { background: var(--warn-bg); color: var(--warn); }
-.s-fail, .s-failed, .s-rejected { background: var(--bad-bg); color: var(--bad); }
+.s-fail, .s-failed, .s-rejected, .s-interrupted { background: var(--bad-bg); color: var(--bad); }
+.s-cancelled { background: var(--chip); color: var(--muted); }
 .s-blocked { background: var(--block-bg); color: var(--block); }
 .s-skip { color: var(--muted); }
 .detail { min-width: 0; }
@@ -70,6 +71,17 @@ ul.tight { margin: 4px 0; padding-left: 18px; }
 details summary { cursor: pointer; color: var(--accent); margin: 6px 0; }
 .empty { padding: 30px; text-align: center; color: var(--muted); }
 .msg { padding: 6px 10px; border-radius: 6px; margin-top: 8px; }
+.left { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+form.newtask { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; display: grid; gap: 8px; }
+form.newtask h2 { font-size: 14px; margin: 0; }
+textarea, input[type=text] { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; width: 100%; }
+textarea { min-height: 70px; resize: vertical; }
+.opts { display: flex; gap: 12px; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+.opts label { display: flex; gap: 4px; align-items: center; }
+pre.live { max-height: 340px; white-space: pre-wrap; word-break: break-word; }
+.pulse { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--warn); animation: p 1.2s infinite; margin-right: 6px; }
+@keyframes p { 50% { opacity: .25; } }
+button:disabled { opacity: .5; cursor: not-allowed; }
 </style>
 </head>
 <body>
@@ -84,7 +96,22 @@ details summary { cursor: pointer; color: var(--accent); margin: 6px 0; }
 </header>
 <section class="tiles" id="tiles"></section>
 <main>
-  <div class="list" id="list"><div class="empty">Loading…</div></div>
+  <div class="left">
+    <form class="newtask" id="newtask">
+      <h2>New task</h2>
+      <textarea id="nt-task" placeholder="e.g. Add a GET /count endpoint to the system alerts router that returns {&quot;count&quot;: n}" required></textarea>
+      <input type="text" id="nt-files" placeholder="Files to edit (optional, comma-separated, relative to the repo)">
+      <input type="text" id="nt-test" placeholder="Test command (optional), e.g. python -m pytest -q tests/unit/test_api_system.py">
+      <div class="opts">
+        <label><input type="checkbox" id="nt-dry"> Plan only (dry run)</label>
+        <label><input type="checkbox" id="nt-local"> Local only</label>
+        <label><input type="checkbox" id="nt-fast"> Fast (3B)</label>
+        <label><input type="checkbox" id="nt-remote"> Remote first</label>
+      </div>
+      <div class="row"><button class="primary" type="submit" id="nt-go">Run</button><span class="muted" id="nt-msg"></span></div>
+    </form>
+    <div class="list" id="list"><div class="empty">Loading…</div></div>
+  </div>
   <div class="detail" id="detail"><div class="card empty">Select a run to see its timeline, checks and diff.</div></div>
 </main>
 <script>
@@ -128,7 +155,9 @@ async function loadRuns() {
   if (!state.target) return;
   const j = await api(`/api/runs?target=${encodeURIComponent(state.target)}`);
   state.runs = j.runs;
+  state.busy = j.busy;
   if (j.costs) state.costs = j.costs;
+  $("#nt-msg").textContent = j.busy ? "A run is in progress; you can still do plan-only runs." : "";
   tiles(j.stats);
   if (!j.runs.length) {
     $("#list").innerHTML = `<div class="empty">No runs yet. Try <code>genie task "…" --dry-run</code>.</div>`;
@@ -162,12 +191,48 @@ function checksTable(checks) {
     <td>${esc(c.summary)}${c.details && c.details.length ? `<ul class="tight">${c.details.slice(0, 12).map(x => `<li><code>${esc(x)}</code></li>`).join("")}</ul>` : ""}</td></tr>`).join("")}</table>`;
 }
 
+const post = (path, body) => api(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Genie": "1" },
+  body: JSON.stringify({ target: state.target, ...body }) });
+
+async function startTask(body) {
+  const r = await post("/api/task", body);
+  state.selected = r.id;
+  await loadRuns();
+  await select(r.id);
+  return r.id;
+}
+
+function elapsed(since) {
+  const s = Math.max(0, Math.round((Date.now() - new Date(since).getTime()) / 1000));
+  return s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`;
+}
+
+async function refreshLive(id) {
+  const box = $("#live");
+  if (!box) return;
+  try {
+    const j = await api(`/api/log?target=${encodeURIComponent(state.target)}&id=${encodeURIComponent(id)}`);
+    const text = j.text || j.spawn_log || "Waiting for output…";
+    const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
+    box.textContent = text;
+    if (atBottom) box.scrollTop = box.scrollHeight;
+    $("#live-name").textContent = j.attempt_log ? `(${j.attempt_log})` : "";
+  } catch (e) { /* ignore */ }
+}
+
 async function select(id) {
   state.selected = id;
   document.querySelectorAll(".run").forEach(el => el.classList.toggle("sel", el.dataset.id === id));
   const j = await api(`/api/run?target=${encodeURIComponent(state.target)}&id=${encodeURIComponent(id)}`);
+  if (j.starting) {
+    $("#detail").innerHTML = `<div class="card"><h2><span class="pulse"></span>Starting run…</h2><pre class="live">${esc(j.spawn_log || "")}</pre></div>`;
+    return;
+  }
   const d = j.run, f = j.files;
-  const canAct = (d.status === "needs_review" || d.status === "failed" || d.status === "blocked") && d.branch;
+  const running = d.status === "running";
+  const canAct = (d.status === "needs_review" || d.status === "failed" || d.status === "blocked" || d.status === "cancelled") && d.branch;
+  const canAccept = canAct && d.status !== "cancelled";
+  const current = running ? (d.steps || []).filter(s => s.status === "running").slice(-1)[0] : null;
   const reasons = (d.escalation_reasons || []);
   $("#detail").innerHTML = `
     <div class="card">
@@ -178,9 +243,14 @@ async function select(id) {
         ${d.branch ? `<span class="muted">branch</span> <code>${esc(d.branch)}</code>` : ""}
         <span class="muted">${esc(d.id)}</span>
         <div style="flex:1"></div>
-        ${canAct ? `<button class="primary" id="acc">Accept (stage changes)</button><button class="danger" id="rej">Reject</button>` : ""}
+        ${d.status === "planned" ? `<button class="primary" id="runplan" ${state.busy ? "disabled" : ""}>Run this for real</button>` : ""}
+        ${running ? `<button class="danger" id="cancel">Cancel</button>` : ""}
+        ${canAccept ? `<button class="primary" id="acc">Accept (stage changes)</button>` : ""}
+        ${canAct ? `<button class="danger" id="rej">Reject</button>` : ""}
       </div>
       <div id="actmsg"></div>
+      ${running ? `<div class="msg s-running"><span class="pulse"></span>Running: <b>${esc(current ? current.name : "starting")}</b> ${current ? `· ${esc(current.detail)} · ${elapsed(current.started)}` : ""}. Local attempts take about 5–6 minutes on this machine.</div>` : ""}
+      ${d.status === "interrupted" ? `<div class="msg s-fail">The genie process stopped unexpectedly. Check the target repo's branch (<code>git status</code>) before starting another run.</div>` : ""}
       ${d.result && d.result.error ? `<div class="msg s-fail">${esc(d.result.error)}</div>` : ""}
       <h3>Why this route</h3>
       <div class="row"><span>Existing-code coverage</span><span class="bar"><i style="width:${Math.min(100, (d.coverage || 0) * 100)}%"></i></span><b>${pct(d.coverage)}</b>
@@ -192,6 +262,7 @@ async function select(id) {
       </ul>
       <div class="muted">Files to edit: ${d.editable.map(x => `<code>${esc(x)}</code>`).join(", ") || "none"}</div>
     </div>
+    ${running ? `<div class="card"><h2>Live model output <span class="muted" id="live-name"></span></h2><pre class="live" id="live">Waiting for output…</pre></div>` : ""}
     <div class="card"><h2>Timeline</h2><div class="steps">${(d.steps || []).map(s => `
       <div class="step"><b>${esc(s.name)}</b><span class="chip s-${esc(s.status)}">${esc(s.status)}</span> ${s.seconds != null ? `<span class="muted">${s.seconds}s</span>` : ""}
       <div class="muted">${esc(s.detail)}</div></div>`).join("")}</div></div>
@@ -216,26 +287,62 @@ async function select(id) {
   `;
   const act = async (kind) => {
     try {
-      const r = await api(`/api/${kind}`, { method: "POST", headers: { "Content-Type": "application/json", "X-Genie": "1" }, body: JSON.stringify({ target: state.target, id }) });
+      const r = await post(`/api/${kind}`, { id });
       $("#actmsg").innerHTML = `<div class="msg s-pass">${esc(r.message)}</div>`;
     } catch (e) { $("#actmsg").innerHTML = `<div class="msg s-fail">${esc(e.message)}</div>`; }
     await loadRuns();
   };
   if ($("#acc")) $("#acc").onclick = () => act("accept");
   if ($("#rej")) $("#rej").onclick = () => act("reject");
+  if ($("#cancel")) $("#cancel").onclick = () => act("cancel");
+  if ($("#runplan")) $("#runplan").onclick = async () => {
+    try {
+      const o = d.options || {};
+      await startTask({ task: d.task, files: (o.files && o.files.length) ? o.files : d.editable,
+        local_only: o.local_only, remote: o.remote, fast: o.fast, test: o.test_cmd });
+    } catch (e) { $("#actmsg").innerHTML = `<div class="msg s-fail">${esc(e.message)}</div>`; }
+  };
+  if (running) refreshLive(id);
 }
+
+$("#newtask").onsubmit = async (e) => {
+  e.preventDefault();
+  const task = $("#nt-task").value.trim();
+  if (!task) return;
+  $("#nt-go").disabled = true;
+  try {
+    await startTask({
+      task,
+      files: $("#nt-files").value.split(",").map(s => s.trim()).filter(Boolean),
+      test: $("#nt-test").value.trim(),
+      dry_run: $("#nt-dry").checked, local_only: $("#nt-local").checked,
+      fast: $("#nt-fast").checked, remote: $("#nt-remote").checked,
+    });
+    $("#nt-task").value = "";
+  } catch (err) { $("#nt-msg").textContent = err.message; }
+  $("#nt-go").disabled = false;
+};
 
 $("#target").onchange = (e) => { state.target = e.target.value; state.selected = null; loadRuns(); };
 $("#refresh").onclick = () => { loadRuns(); if (state.selected) select(state.selected); };
 (async () => {
   try { await loadTargets(); await loadRuns(); } catch (e) { $("#list").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+  // Poll every 2 s: refresh the list, and the selected run while it is starting or running.
   setInterval(async () => {
     try {
       await loadRuns();
+      if (!state.selected) return;
       const r = state.runs.find(x => x.id === state.selected);
-      if (r && r.status === "running") select(state.selected);
+      if (!r || r.status === "running") {
+        const live = $("#live");
+        const keep = live ? live.scrollTop : null;
+        await select(state.selected);
+        if (keep !== null && $("#live")) $("#live").scrollTop = keep;
+      } else if ($("#live")) {
+        select(state.selected);  // it just finished: show the final state
+      }
     } catch (e) { /* server stopped */ }
-  }, 4000);
+  }, 2000);
 })();
 </script>
 </body>
