@@ -18,6 +18,8 @@ will would shall may might please make add adds adding new create creates update
 change changes use uses using fix fixes implement implements write support supports allow
 existing current so do does done get set file files code function functions method methods
 class classes value values return returns based like just only all any some more less one two
+bug bugs instead crash crashes crashing broken wrong correct correctly properly issue issues
+need needs want wants currently case cases sure ensure them they their there here
 """.split())
 
 DOC_KINDS = {"doc"}

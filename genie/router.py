@@ -68,11 +68,20 @@ def plan_task(target: Target, settings: dict, task: str, files: list[str] | None
                + AIDER_OVERHEAD_TOKENS + OUTPUT_RESERVE_TOKENS)
     budget = loc["context_tokens"]
 
+    # Does the task name existing functions/classes in the files being edited?
+    # Then it changes existing code (e.g. a bug fix), not a new capability.
+    qtok = set(s.query_tokens(task))
+    named = sorted({it["name"] for it in index["items"]
+                    if it["file"] in editable and it["kind"] in {"function", "method", "class"}
+                    and it["name"].split(".")[-1].lower() in qtok})
+
     esc = settings["escalation"]
     reasons = []
     if force_remote:
         reasons.append("forced with --remote")
-    if coverage < esc["min_coverage"]:
+    if coverage < esc["min_coverage"] and named:
+        pass  # low vocabulary overlap, but it edits named existing code
+    elif coverage < esc["min_coverage"]:
         reasons.append(f"new capability: the best existing match covers {coverage:.0%} of the task's "
                        f"vocabulary (threshold {esc['min_coverage']:.0%})"
                        + (f"; words not found anywhere in the repo: {', '.join(unknown[:6])}" if unknown else ""))
@@ -92,12 +101,16 @@ def plan_task(target: Target, settings: dict, task: str, files: list[str] | None
     elif reasons:
         route = "local"
         decisions.append(f"Remote would be preferred, but it is unavailable ({why}); trying local")
+    elif named:
+        route = "local"
+        decisions.append(f"Task changes existing code ({', '.join(named[:5])}); local model first")
     else:
         route = "local"
         decisions.append("Existing code covers the task; local model first")
 
     return {
         "code_matches": code, "doc_matches": docs, "coverage": coverage, "unknown_terms": unknown,
+        "named_symbols": named,
         "editable": editable, "new_files": new_files, "context": ctx,
         "estimate": {"needed_tokens": need, "local_budget": budget, "context_tokens": estimate_tokens(ctx),
                      "file_tokens": file_tokens},
@@ -136,8 +149,15 @@ def run_task(target: Target, settings: dict, task: str, files: list[str] | None 
     d["planned_route"] = d["route"]
     run.end_step(st, detail=f"{d['route']}: " + "; ".join(d["escalation_reasons"] or d["decisions"]))
 
+    if not d["editable"]:
+        d["decisions"].append("No suitable file to edit was found (protected or test files only); pass --file")
     if dry_run:
         d["status"] = "planned"
+        run.save()
+        return run
+    if not d["editable"]:
+        d["status"] = "failed"
+        d["result"] = {"error": "No file to edit. Re-run with --file <path> (it may be a new file)."}
         run.save()
         return run
 

@@ -37,7 +37,6 @@ def choose_files(code_matches: list[dict], limit: int, task: str = "") -> list[s
     """Pick files to edit: source files first; test files only if the task is about tests."""
     wants_tests = "test" in task.lower()
     ordered = [m for m in code_matches if wants_tests or not _is_test(m["file"])]
-    ordered += [m for m in code_matches if m not in ordered]
     out: list[str] = []
     for m in ordered:
         if m["kind"] in {"css-var"}:
